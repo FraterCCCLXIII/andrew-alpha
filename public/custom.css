@@ -66,6 +66,10 @@ button.archive-source-link:hover {
   width: 160px;
 }
 
+.archive-start-orb-host[hidden] {
+  display: none;
+}
+
 .archive-start-title {
   color: hsl(var(--foreground));
   font-size: 1.75rem;

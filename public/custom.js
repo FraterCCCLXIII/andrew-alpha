@@ -9,6 +9,7 @@
 
   const AVATAR_RENDERER = "three";
   const THREE_ORB_PRESET = "Default";
+  const ORBS_ENABLED = false;
 
   const MODE_OPTIONS = [
     {
@@ -190,7 +191,7 @@
   }
 
   function initAssistantOrbAvatars(root) {
-    if (!window.ArchiveOrbAvatar) {
+    if (!ORBS_ENABLED || !window.ArchiveOrbAvatar) {
       return;
     }
 
@@ -607,15 +608,22 @@
     if (!hero) {
       hero = document.createElement("div");
       hero.className = "archive-start-hero";
-      hero.innerHTML =
-        '<div class="archive-start-orb-host" aria-hidden="true"></div>' +
-        '<h1 class="archive-start-title"></h1>' +
-        '<p class="archive-start-description"></p>';
+      hero.innerHTML = ORBS_ENABLED
+        ? '<div class="archive-start-orb-host" aria-hidden="true"></div>' +
+          '<h1 class="archive-start-title"></h1>' +
+          '<p class="archive-start-description"></p>'
+        : '<h1 class="archive-start-title"></h1>' +
+          '<p class="archive-start-description"></p>';
       welcome.insertBefore(hero, welcome.firstChild);
     }
 
     const orbHost = hero.querySelector(".archive-start-orb-host");
+    if (orbHost) {
+      orbHost.hidden = !ORBS_ENABLED;
+    }
+
     if (
+      ORBS_ENABLED &&
       orbHost &&
       window.ArchiveThreeOrbAvatar &&
       orbHost.dataset.startOrbMounted !== "true"
@@ -700,6 +708,10 @@
   }
 
   function loadOrbModule(callback) {
+    if (!ORBS_ENABLED) {
+      callback();
+      return;
+    }
     if (AVATAR_RENDERER === "three") {
       loadThreeOrbModule(callback);
       return;
