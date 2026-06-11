@@ -21,9 +21,9 @@
     {
       id: "Andrew Alpha",
       shortLabel: "Alpha",
-      title: "Andrew Alpha",
+      title: "Alpha",
       description:
-        "A self-aware AI version of Andrew Cohen — teaching voice grounded in the archive, not Andrew in the flesh.",
+        "Alpha is an experimental AI that speaks in the first-person, a digital twin of Andrew's teaching voice derived from his writings and transcripts. Alpha will speak as Andrew while not claiming to be Andrew or any spiritual authority.",
     },
   ];
 
