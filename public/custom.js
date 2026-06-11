@@ -29,19 +29,77 @@
 
   let scanScheduled = false;
   let shadowObserver = null;
-  let activeProfileName = null;
+  let activeProfileName = MODE_OPTIONS[0].id;
   let chainlitSessionId = null;
+
+  function readSessionIdFromCookie() {
+    const match = document.cookie.match(/(?:^|;\s*)X-Chainlit-Session-id=([^;]+)/);
+    return match ? decodeURIComponent(match[1]) : null;
+  }
+
+  function currentProfileName() {
+    return activeProfileName || MODE_OPTIONS[0].id;
+  }
+
+  function decorateOutboundMessage(message) {
+    if (!message || typeof message !== "object") {
+      return message;
+    }
+
+    const profileName = currentProfileName();
+    const prefix = buildModeMessagePrefix();
+    const content = typeof message.output === "string" ? message.output : "";
+    const stripped = content.replace(MODE_MARKER_PATTERN, "");
+    message.output = prefix + stripped;
+    message.metadata = Object.assign({}, message.metadata || {}, {
+      archive_profile: profileName,
+    });
+    return message;
+  }
+
+  function patchSocketIoPayload(data) {
+    if (typeof data !== "string" || data.indexOf("client_message") === -1) {
+      return data;
+    }
+
+    if (!data.startsWith("42")) {
+      return data;
+    }
+
+    try {
+      const parsed = JSON.parse(data.slice(2));
+      if (!Array.isArray(parsed) || parsed[0] !== "client_message" || !parsed[1]) {
+        return data;
+      }
+
+      parsed[1].message = decorateOutboundMessage(parsed[1].message);
+      return "42" + JSON.stringify(parsed);
+    } catch (_error) {
+      return data;
+    }
+  }
+
+  const PROFILE_TO_MODE = {
+    "Archive Research": "archive",
+    "Andrew Alpha": "andrew_alpha",
+  };
 
   const PROFILE_TO_ACTION = {
     "Archive Research": "switch_mode_archive",
     "Andrew Alpha": "switch_mode_alpha",
   };
 
+  const MODE_MARKER_ARCHIVE = "\u200B\u200C";
+  const MODE_MARKER_ALPHA = "\u200B\u200D";
+  const MODE_MARKER_PATTERN = /^\u200B(\u200C|\u200D)\s*/;
+
   function installSessionIdCapture() {
     if (window.__archiveSessionIdCapture) {
       return;
     }
     window.__archiveSessionIdCapture = true;
+
+    chainlitSessionId = readSessionIdFromCookie();
 
     const originalFetch = window.fetch.bind(window);
     window.fetch = function (input, init) {
@@ -57,6 +115,17 @@
       }
       return originalFetch(input, init);
     };
+
+    if (!window.__archiveWebSocketCapture) {
+      window.__archiveWebSocketCapture = true;
+      const originalSend = WebSocket.prototype.send;
+      WebSocket.prototype.send = function (data) {
+        if (typeof data === "string") {
+          data = patchSocketIoPayload(data);
+        }
+        return originalSend.call(this, data);
+      };
+    }
   }
 
   function rootPath() {
@@ -93,7 +162,14 @@
 
   function ensureShadowObserver() {
     const shadow = window.cl_shadowRootElement;
-    if (!shadow || shadowObserver) {
+    if (!shadow) {
+      return;
+    }
+
+    installModeToggleDelegationOnRoot(shadow);
+    installOutboundModeHookOnRoot(shadow);
+
+    if (shadowObserver) {
       return;
     }
 
@@ -163,6 +239,106 @@
     return activeProfileName;
   }
 
+  function activeModeKey() {
+    return PROFILE_TO_MODE[activeProfileName || MODE_OPTIONS[0].id] || "archive";
+  }
+
+  function buildModeMessagePrefix() {
+    return activeModeKey() === "andrew_alpha"
+      ? MODE_MARKER_ALPHA
+      : MODE_MARKER_ARCHIVE;
+  }
+
+  function injectModeIntoComposerInput() {
+    const profileName = currentProfileName();
+    activeProfileName = profileName;
+    ensureServerModeBeforeSend();
+
+    forEachRoot(function (root) {
+      const input = root.querySelector("#chat-input");
+      if (!input) {
+        return;
+      }
+
+      const textarea =
+        input.tagName === "TEXTAREA"
+          ? input
+          : input.querySelector("textarea,[contenteditable='true']");
+      if (!textarea) {
+        return;
+      }
+
+      const prefix = buildModeMessagePrefix();
+      const currentValue =
+        textarea.tagName === "TEXTAREA"
+          ? textarea.value
+          : textarea.textContent || "";
+      const stripped = currentValue.replace(MODE_MARKER_PATTERN, "");
+      const nextValue = prefix + stripped;
+
+      if (textarea.tagName === "TEXTAREA") {
+        textarea.value = nextValue;
+      } else {
+        textarea.textContent = nextValue;
+      }
+
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  }
+
+  function ensureServerModeBeforeSend() {
+    const profileName = currentProfileName();
+    persistModeSelection(profileName).catch(function () {
+      // Best-effort sync before each send.
+    });
+  }
+
+  function persistModeSelection(profileName) {
+    const actionName = PROFILE_TO_ACTION[profileName];
+    const requests = [
+      window.fetch(rootPath() + "/archive/set-mode", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ profile: profileName }),
+      }),
+    ];
+
+    if (actionName && chainlitSessionId) {
+      requests.push(
+        window.fetch(rootPath() + "/project/action", {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            sessionId: chainlitSessionId,
+            action: {
+              name: actionName,
+              payload: {},
+              label: actionName,
+            },
+          }),
+        })
+      );
+    }
+
+    return Promise.allSettled(requests).then(function (results) {
+      const httpResult = results[0];
+      if (httpResult.status === "fulfilled" && httpResult.value.ok) {
+        return httpResult.value.json();
+      }
+      const actionResult = results[1];
+      if (
+        actionResult &&
+        actionResult.status === "fulfilled" &&
+        actionResult.value.ok
+      ) {
+        return actionResult.value.json();
+      }
+      throw new Error("Mode switch failed");
+    });
+  }
+
   function selectProfile(profileName) {
     if (activeProfileName === profileName) {
       return;
@@ -171,63 +347,117 @@
     activeProfileName = profileName;
     forEachRoot(updateModeToggleState);
 
-    const actionName = PROFILE_TO_ACTION[profileName];
-    if (actionName && chainlitSessionId) {
-      originalFetchSetModeViaAction(actionName);
-      return;
-    }
-
-    fallbackSetModeViaHttp(profileName);
-  }
-
-  function originalFetchSetModeViaAction(actionName) {
-    window
-      .fetch(rootPath() + "/project/action", {
-        method: "POST",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          sessionId: chainlitSessionId,
-          action: {
-            name: actionName,
-            payload: {},
-            label: actionName,
-          },
-        }),
-      })
-      .then(function (response) {
-        if (!response.ok) {
-          throw new Error("Action failed with status " + response.status);
-        }
-      })
-      .catch(function (error) {
-        console.warn("Mode action failed, falling back to HTTP:", error);
-        fallbackSetModeViaHttp(activeProfileName);
-      });
-  }
-
-  function fallbackSetModeViaHttp(profileName) {
-    window
-      .fetch(rootPath() + "/archive/set-mode", {
-        method: "POST",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ profile: profileName }),
-      })
-      .then(function (response) {
-        if (!response.ok) {
-          throw new Error("HTTP mode switch failed with status " + response.status);
-        }
-        return response.json();
-      })
+    persistModeSelection(profileName)
       .then(function (data) {
         if (data && data.sessionId) {
           chainlitSessionId = data.sessionId;
         }
       })
       .catch(function (error) {
-        console.warn("Mode switch failed:", error);
+        console.warn("Mode switch persist failed:", error);
       });
+  }
+
+  function handleModeToggleClick(event) {
+    const button = event.target.closest(".archive-mode-toggle-button");
+    if (!button || !button.dataset.profile) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    selectProfile(button.dataset.profile);
+  }
+
+  function installModeToggleDelegation() {
+    if (window.__archiveToggleDelegation) {
+      return;
+    }
+    window.__archiveToggleDelegation = true;
+
+    document.addEventListener("click", handleModeToggleClick, true);
+  }
+
+  function installModeToggleDelegationOnRoot(root) {
+    if (!root || root.__archiveToggleDelegation) {
+      return;
+    }
+    root.__archiveToggleDelegation = true;
+    root.addEventListener("click", handleModeToggleClick, true);
+  }
+
+  function installOutboundModeHook() {
+    if (window.__archiveOutboundModeHook) {
+      return;
+    }
+    window.__archiveOutboundModeHook = true;
+
+    function handleSubmitIntent(event) {
+      if (event.target.closest("#chat-submit")) {
+        injectModeIntoComposerInput();
+      }
+    }
+
+    function handleEnterIntent(event) {
+      if (event.key !== "Enter" || event.shiftKey) {
+        return;
+      }
+      if (!event.target.closest("#chat-input")) {
+        return;
+      }
+      injectModeIntoComposerInput();
+    }
+
+    function handleStarterIntent(event) {
+      const starter = event.target.closest("[data-test^='starter:'], button");
+      if (!starter || !starter.closest("#welcome-screen")) {
+        return;
+      }
+      const label = (starter.textContent || "").trim();
+      if (!label) {
+        return;
+      }
+      injectModeIntoComposerInput();
+    }
+
+    document.addEventListener("click", handleSubmitIntent, true);
+    document.addEventListener("keydown", handleEnterIntent, true);
+    document.addEventListener("click", handleStarterIntent, true);
+
+    installOutboundModeHookOnRoot(document);
+  }
+
+  function installOutboundModeHookOnRoot(root) {
+    if (!root || root.__archiveOutboundModeHook) {
+      return;
+    }
+    root.__archiveOutboundModeHook = true;
+
+    root.addEventListener(
+      "click",
+      function (event) {
+        if (event.target.closest("#chat-submit")) {
+          injectModeIntoComposerInput();
+        }
+        const starter = event.target.closest("[data-test^='starter:'], button");
+        if (starter && starter.closest("#welcome-screen")) {
+          injectModeIntoComposerInput();
+        }
+      },
+      true
+    );
+
+    root.addEventListener(
+      "keydown",
+      function (event) {
+        if (event.key !== "Enter" || event.shiftKey) {
+          return;
+        }
+        if (event.target.closest("#chat-input")) {
+          injectModeIntoComposerInput();
+        }
+      },
+      true
+    );
   }
 
   function bootstrapArchiveSession() {
@@ -245,6 +475,8 @@
         }
         if (data.sessionId) {
           chainlitSessionId = data.sessionId;
+        } else {
+          chainlitSessionId = readSessionIdFromCookie() || chainlitSessionId;
         }
         if (data.profile) {
           activeProfileName = data.profile;
@@ -254,6 +486,22 @@
       .catch(function () {
         // Session bootstrap is best-effort.
       });
+  }
+
+  function bindModeToggleButtons(toggle) {
+    toggle.querySelectorAll(".archive-mode-toggle-button").forEach(function (button) {
+      if (button.dataset.archiveClickBound === "true") {
+        return;
+      }
+      button.dataset.archiveClickBound = "true";
+      button.addEventListener("click", function (event) {
+        event.preventDefault();
+        event.stopPropagation();
+        if (button.dataset.profile) {
+          selectProfile(button.dataset.profile);
+        }
+      });
+    });
   }
 
   function buildModeToggle() {
@@ -269,7 +517,9 @@
       button.dataset.profile = option.id;
       button.textContent = option.shortLabel;
       button.title = option.id;
-      button.addEventListener("click", function () {
+      button.addEventListener("click", function (event) {
+        event.preventDefault();
+        event.stopPropagation();
         selectProfile(option.id);
       });
       toggle.appendChild(button);
@@ -308,6 +558,7 @@
       actionRow.insertBefore(toggle, submit);
     }
 
+    bindModeToggleButtons(toggle);
     composer.dataset.archiveToggleMounted = "true";
   }
 
@@ -458,6 +709,8 @@
 
   function start() {
     installSessionIdCapture();
+    installOutboundModeHook();
+    installModeToggleDelegation();
     bootstrapArchiveSession();
     loadOrbModule(function () {
       scanAll();

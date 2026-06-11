@@ -8,6 +8,10 @@ sys.path.insert(0, str(ROOT))
 
 import chainlit as cl
 from chainlit.chat_context import chat_context
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+
+import re
 
 from rag.config import get_settings
 from rag.modes import CHAT_PROFILES, MODE_ANDREW_ALPHA, MODE_ARCHIVE
@@ -25,6 +29,9 @@ PROFILE_TO_MODE = {
 SESSION_MODE_KEY = "response_mode"
 PENDING_SOURCES_KEY = "pending_sources"
 SOURCE_EXCERPT_LENGTH = 500
+MODE_MESSAGE_PATTERN = re.compile(
+    r"^\u200B(\u200C|\u200D)\s*",
+)
 
 
 def absolute_url(path: str) -> str:
@@ -90,10 +97,19 @@ def hide_sources_action(message_id: str) -> cl.Action:
 
 
 def get_response_mode() -> str:
-    stored = cl.user_session.get(SESSION_MODE_KEY)
+    from chainlit.context import context
+    from chainlit.user_session import user_sessions
+
+    session = context.session
+    if not session:
+        return MODE_ARCHIVE
+
+    bucket = user_sessions.get(session.id, {})
+    stored = bucket.get(SESSION_MODE_KEY)
     if stored in (MODE_ARCHIVE, MODE_ANDREW_ALPHA):
         return stored
-    profile_name = cl.user_session.get("chat_profile")
+
+    profile_name = bucket.get("chat_profile") or session.chat_profile
     return PROFILE_TO_MODE.get(profile_name, MODE_ARCHIVE)
 
 
@@ -109,7 +125,56 @@ def apply_mode_for_profile(session, profile_name: str) -> str | None:
     bucket[SESSION_MODE_KEY] = mode
     bucket["chat_profile"] = profile_name
     bucket["id"] = session.id
+    cl.user_session.set(SESSION_MODE_KEY, mode)
     return mode
+
+
+def apply_mode_from_client(profile_name: str) -> str | None:
+    from chainlit.context import context
+
+    if not context.session:
+        return None
+    if profile_name not in PROFILE_TO_MODE:
+        return None
+    return apply_mode_for_profile(context.session, profile_name)
+
+
+def parse_question_mode(question: str) -> tuple[str, str | None]:
+    match = MODE_MESSAGE_PATTERN.match(question)
+    if not match:
+        return question, None
+
+    cleaned = MODE_MESSAGE_PATTERN.sub("", question, count=1).strip()
+    if match.group(1) == "\u200D":
+        return cleaned, MODE_ANDREW_ALPHA
+    return cleaned, MODE_ARCHIVE
+
+
+def resolve_response_mode(
+    question: str,
+    metadata: dict | None = None,
+) -> tuple[str, str]:
+    from chainlit.context import context, get_context
+
+    cleaned, message_mode = parse_question_mode(question)
+    mode = message_mode
+
+    if not mode and isinstance(metadata, dict):
+        profile_name = metadata.get("archive_profile")
+        if isinstance(profile_name, str) and profile_name in PROFILE_TO_MODE:
+            mode = PROFILE_TO_MODE[profile_name]
+
+    try:
+        get_context()
+        session = context.session
+    except Exception:
+        session = None
+
+    if mode and session:
+        apply_mode_for_profile(session, CHAT_PROFILES[mode]["name"])
+        return cleaned, mode
+
+    return cleaned, get_response_mode()
 
 
 @cl.set_chat_profiles
@@ -166,77 +231,115 @@ async def chat_profiles() -> list[cl.ChatProfile]:
 @cl.on_chat_start
 async def on_chat_start() -> None:
     from chainlit.context import context
+    from chainlit.user_session import user_sessions
 
-    profile_name = cl.user_session.get("chat_profile") or CHAT_PROFILES[MODE_ARCHIVE]["name"]
+    bucket = user_sessions.get(context.session.id, {})
+    if bucket.get(SESSION_MODE_KEY) in (MODE_ARCHIVE, MODE_ANDREW_ALPHA):
+        return
+
+    profile_name = context.session.chat_profile or CHAT_PROFILES[MODE_ARCHIVE]["name"]
     apply_mode_for_profile(context.session, profile_name)
+
+
+@cl.on_window_message
+async def on_window_message(data: dict) -> None:
+    if not isinstance(data, dict) or data.get("type") != "archive_set_mode":
+        return
+    profile_name = data.get("profile")
+    if isinstance(profile_name, str):
+        apply_mode_from_client(profile_name)
+
+
+async def archive_session_handler(request: Request) -> JSONResponse:
+    from chainlit.session import WebsocketSession
+    from chainlit.user_session import user_sessions
+
+    session_id = request.cookies.get("X-Chainlit-Session-id")
+    if not session_id:
+        return JSONResponse({"sessionId": None, "mode": None, "profile": None})
+
+    session = WebsocketSession.get_by_id(session_id)
+    if not session:
+        return JSONResponse({"sessionId": session_id, "mode": None, "profile": None})
+
+    bucket = user_sessions.get(session_id, {})
+    mode = bucket.get(SESSION_MODE_KEY)
+    profile = bucket.get("chat_profile") or session.chat_profile
+    return JSONResponse(
+        {
+            "sessionId": session_id,
+            "mode": mode,
+            "profile": profile,
+        }
+    )
+
+
+async def archive_set_mode_handler(request: Request) -> JSONResponse:
+    from chainlit.context import init_ws_context
+    from chainlit.session import WebsocketSession
+
+    session_id = request.cookies.get("X-Chainlit-Session-id")
+    if not session_id:
+        return JSONResponse(
+            {"success": False, "detail": "Missing session"},
+            status_code=400,
+        )
+
+    session = WebsocketSession.get_by_id(session_id)
+    if not session:
+        return JSONResponse(
+            {"success": False, "detail": "Session not found"},
+            status_code=404,
+        )
+
+    body = await request.json()
+    profile_name = body.get("profile")
+    if profile_name not in PROFILE_TO_MODE:
+        return JSONResponse(
+            {"success": False, "detail": "Invalid profile"},
+            status_code=400,
+        )
+
+    init_ws_context(session)
+    mode = apply_mode_for_profile(session, profile_name)
+
+    return JSONResponse(
+        {
+            "success": True,
+            "mode": mode,
+            "profile": profile_name,
+            "sessionId": session_id,
+        }
+    )
+
+
+def _insert_routes_before_catch_all(app, routes: list) -> None:
+    catch_all_index = next(
+        (
+            index
+            for index, route in enumerate(app.routes)
+            if getattr(route, "path", None) == "/{full_path:path}"
+        ),
+        len(app.routes),
+    )
+    for offset, route in enumerate(routes):
+        app.routes.insert(catch_all_index + offset, route)
 
 
 @cl.on_app_startup
 async def register_archive_routes() -> None:
-    from chainlit.context import init_ws_context
     from chainlit.server import app
-    from chainlit.session import WebsocketSession
-    from fastapi import Request
-    from fastapi.responses import JSONResponse
+    from starlette.routing import Route
 
-    @app.get("/archive/session")
-    async def archive_session(request: Request) -> JSONResponse:
-        session_id = request.cookies.get("X-Chainlit-Session-id")
-        if not session_id:
-            return JSONResponse({"sessionId": None, "mode": None, "profile": None})
+    if getattr(app.state, "archive_routes_registered", False):
+        return
 
-        session = WebsocketSession.get_by_id(session_id)
-        if not session:
-            return JSONResponse({"sessionId": session_id, "mode": None, "profile": None})
-
-        from chainlit.user_session import user_sessions
-
-        bucket = user_sessions.get(session_id, {})
-        mode = bucket.get(SESSION_MODE_KEY)
-        profile = bucket.get("chat_profile") or session.chat_profile
-        return JSONResponse(
-            {
-                "sessionId": session_id,
-                "mode": mode,
-                "profile": profile,
-            }
-        )
-
-    @app.post("/archive/set-mode")
-    async def archive_set_mode(request: Request) -> JSONResponse:
-        session_id = request.cookies.get("X-Chainlit-Session-id")
-        if not session_id:
-            return JSONResponse(
-                {"success": False, "detail": "Missing session"},
-                status_code=400,
-            )
-
-        session = WebsocketSession.get_by_id(session_id)
-        if not session:
-            return JSONResponse(
-                {"success": False, "detail": "Session not found"},
-                status_code=404,
-            )
-
-        body = await request.json()
-        profile_name = body.get("profile")
-        if profile_name not in PROFILE_TO_MODE:
-            return JSONResponse(
-                {"success": False, "detail": "Invalid profile"},
-                status_code=400,
-            )
-
-        init_ws_context(session)
-        mode = apply_mode_for_profile(session, profile_name)
-
-        return JSONResponse(
-            {
-                "success": True,
-                "mode": mode,
-                "profile": profile_name,
-                "sessionId": session_id,
-            }
-        )
+    archive_routes = [
+        Route("/archive/session", archive_session_handler, methods=["GET"]),
+        Route("/archive/set-mode", archive_set_mode_handler, methods=["POST"]),
+    ]
+    _insert_routes_before_catch_all(app, archive_routes)
+    app.state.archive_routes_registered = True
 
 
 @cl.action_callback("switch_mode_archive")
@@ -285,12 +388,16 @@ async def on_hide_sources(action: cl.Action) -> None:
 
 @cl.on_message
 async def on_message(message: cl.Message) -> None:
-    question = message.content.strip()
-    if not question:
+    raw_question = message.content.strip()
+    if not raw_question:
         await cl.Message(content="Please enter a question about the archive.").send()
         return
 
-    mode = get_response_mode()
+    metadata = message.metadata if isinstance(message.metadata, dict) else {}
+    question, mode = resolve_response_mode(raw_question, metadata)
+    if not question:
+        await cl.Message(content="Please enter a question about the archive.").send()
+        return
 
     try:
         passages = retrieve_passages(question, settings=settings)

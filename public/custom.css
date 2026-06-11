@@ -112,6 +112,9 @@ button.archive-source-link:hover {
   margin-right: 0.25rem;
   overflow: hidden;
   padding: 0.125rem;
+  pointer-events: auto;
+  position: relative;
+  z-index: 5;
 }
 
 .archive-mode-toggle-button {
@@ -125,7 +128,10 @@ button.archive-source-link:hover {
   line-height: 1;
   min-width: 3.25rem;
   padding: 0.3125rem 0.5rem;
+  pointer-events: auto;
+  position: relative;
   transition: background-color 0.15s ease, color 0.15s ease;
+  z-index: 6;
 }
 
 .archive-mode-toggle-button:hover {
