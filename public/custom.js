@@ -161,12 +161,30 @@
     });
   }
 
+  function installCustomScrollbarStylesInShadow(shadow) {
+    if (!shadow || shadow.querySelector("#archive-scrollbar-styles")) {
+      return;
+    }
+
+    const style = document.createElement("style");
+    style.id = "archive-scrollbar-styles";
+    style.textContent =
+      "*{scrollbar-width:thin;scrollbar-color:hsl(var(--muted-foreground)/0.32) transparent;}" +
+      "*::-webkit-scrollbar{height:6px;width:6px;}" +
+      "*::-webkit-scrollbar-track{background:transparent;}" +
+      "*::-webkit-scrollbar-thumb{background-color:hsl(var(--muted-foreground)/0.32);border:2px solid transparent;border-radius:9999px;background-clip:padding-box;}" +
+      "*::-webkit-scrollbar-thumb:hover{background-color:hsl(var(--muted-foreground)/0.5);}" +
+      "*::-webkit-scrollbar-corner{background:transparent;}";
+    shadow.insertBefore(style, shadow.firstChild);
+  }
+
   function ensureShadowObserver() {
     const shadow = window.cl_shadowRootElement;
     if (!shadow) {
       return;
     }
 
+    installCustomScrollbarStylesInShadow(shadow);
     installModeToggleDelegationOnRoot(shadow);
     installOutboundModeHookOnRoot(shadow);
 
