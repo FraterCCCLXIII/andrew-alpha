@@ -1,0 +1,18 @@
+[project]
+# Chainlit app metadata
+name = "Andrew Cohen Archive"
+description = "Ask questions across Andrew Cohen's books, teachings, journal, transcripts, and dictionary."
+enable_telemetry = false
+default_expand_messages = false
+
+[UI]
+name = "Andrew Cohen Archive"
+default_theme = "dark"
+show_readme_as_default = false
+default_collapse_content = false
+avatar_size = 32
+custom_css = "/public/custom.css"
+custom_js = "/public/custom.js"
+
+[meta]
+generated_by = "1.0.0"
