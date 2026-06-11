@@ -162,19 +162,21 @@
   }
 
   function installCustomScrollbarStylesInShadow(shadow) {
-    if (!shadow || shadow.querySelector("#archive-scrollbar-styles")) {
+    if (!shadow || shadow.querySelector("#archive-ui-styles")) {
       return;
     }
 
     const style = document.createElement("style");
-    style.id = "archive-scrollbar-styles";
+    style.id = "archive-ui-styles";
     style.textContent =
       "*{scrollbar-width:thin;scrollbar-color:hsl(var(--muted-foreground)/0.32) transparent;}" +
       "*::-webkit-scrollbar{height:6px;width:6px;}" +
       "*::-webkit-scrollbar-track{background:transparent;}" +
       "*::-webkit-scrollbar-thumb{background-color:hsl(var(--muted-foreground)/0.32);border:2px solid transparent;border-radius:9999px;background-clip:padding-box;}" +
       "*::-webkit-scrollbar-thumb:hover{background-color:hsl(var(--muted-foreground)/0.5);}" +
-      "*::-webkit-scrollbar-corner{background:transparent;}";
+      "*::-webkit-scrollbar-corner{background:transparent;}" +
+      ".ai-message>span:first-child{display:none!important;}" +
+      ".ai-message{gap:0!important;}";
     shadow.insertBefore(style, shadow.firstChild);
   }
 

@@ -39,6 +39,15 @@ body,
   background: transparent;
 }
 
+/* Hide assistant avatars in the conversation feed for now */
+.ai-message > span:first-child {
+  display: none !important;
+}
+
+.ai-message {
+  gap: 0 !important;
+}
+
 button.archive-source-link {
   all: unset;
   display: inline-block;
